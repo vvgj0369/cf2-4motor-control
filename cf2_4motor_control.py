@@ -2,7 +2,7 @@
 四电机 MuJoCo Crazyflie 基础飞行控制器。
 
 1. 读取无人机当前位置、速度、姿态四元数、角速度；
-2. 生成位置轨迹：起飞 -> 悬停 -> x/y 方向移动 -> 悬停 -> 降落；
+2. 生成位置轨迹：起飞 -> 悬停 -> 按照矩形轨迹飞行，并在到达四个点时分别悬停2秒 -> 降落；
 3. 位置外环：根据 x/y/z 位置误差计算期望加速度 acc_cmd;
 4. 将 acc_cmd 转换为总推力 thrust_total、roll_ref、pitch_ref;
 5. yaw_ref 默认保持初始航向 initial_yaw;
@@ -109,12 +109,11 @@ class QuadParams:
     # 相对于初始高度上升多少米。
     hover_height: float = 0.30
 
-    # 起飞后向 x 方向移动多少米。
-    target_x_step: float = 0.30
+    # 矩形轨迹的 x 方向长度，单位 m。
+    rectangle_x_length: float = 0.40
 
-    # 起飞后向 y 方向移动多少米。
-    target_y_step: float = 0.20
-
+    # 矩形轨迹的 y 方向宽度，单位 m。
+    rectangle_y_width: float = 0.25
 
 # ============================================================
 # 2. 状态和参考量的数据结构
@@ -147,9 +146,9 @@ class PositionReference:
     """
     轨迹生成器输出的位置参考。不是目标位置！
 
-    pos:当前标位置 [x_ref, y_ref, z_ref]
+    pos:当前时刻参考位置 [x_ref, y_ref, z_ref]
 
-    vel:当前目标速度 [vx_ref, vy_ref, vz_ref]
+    vel:当前时刻参考速度 [vx_ref, vy_ref, vz_ref]
 
     yaw:目标偏航角 yaw_ref。(当前版本默认保持初始 yaw,不主动规划转向。)
     """
@@ -164,10 +163,8 @@ class PositionReference:
 # ============================================================
 
 class FourMotorController:
-    """
-    四旋翼级联 PID 控制器
-    """
-    # 初始化，只在开头运行一次
+
+    # 控制器初始化，只在开头控制器创建时运行一次
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, params: QuadParams):
         self.model = model
         self.data = data
@@ -179,12 +176,11 @@ class FourMotorController:
         # MuJoCo freejoint 的 qpos 通常为：
         # qpos = [x, y, z, qw, qx, qy, qz]
         self.initial_pos = np.array(data.qpos[0:3], dtype=float)
-        self.initial_z = float(self.initial_pos[2])
+        #self.initial_z = float(self.initial_pos[2])
 
-        # 保存初始 yaw。
-        # 这样轨迹中 yaw_ref 可以默认保持初始朝向，而不是强制为 0。
+        # 让无人机一直保持初始航向。从初始四元数得出初始yaw，这样后面轨迹中yaw_ref = self.initial_yaw。
         initial_quat = np.array(data.qpos[3:7], dtype=float)
-        _, _, self.initial_yaw = self.quat_to_euler_wxyz(initial_quat)
+        _,_,self.initial_yaw = self.quat_to_euler_wxyz(initial_quat)
 
         # 建立传感器索引，方便按名字读取 sensor 数据。
         self.sensor_slices = {
@@ -201,14 +197,11 @@ class FourMotorController:
         self.last_info: dict[str, object] = {}
 
     # ------------------------------------------------------------
-    # 3.1 传感器读取相关函数
+    # 3.1 传感器读取相关函数（MuJoCo 所有 sensor 数据都存在 data.sensordata 这个长数组里）
     # ------------------------------------------------------------
 
+    # 根据 sensor 名字找到该 sensor 在 sensordata 里的位置。
     def _sensor_slice(self, sensor_name: str) -> slice:
-        """
-        根据 MuJoCo sensor 名字找到该 sensor 在 sensordata 里的索引范围。
-        """
-
         sensor_id = mujoco.mj_name2id(
             self.model,
             mujoco.mjtObj.mjOBJ_SENSOR,
@@ -222,12 +215,9 @@ class FourMotorController:
         dim = self.model.sensor_dim[sensor_id]
 
         return slice(adr, adr + dim)
-
+    
+    # 根据位置读取指定 sensor 的当前数值。 
     def _read_sensor(self, sensor_name: str) -> np.ndarray:
-        """
-        读取指定 sensor 的当前数值。
-        """
-
         s = self.sensor_slices[sensor_name]
         return np.array(self.data.sensordata[s], dtype=float)
 
@@ -238,7 +228,7 @@ class FourMotorController:
     @staticmethod
     def wrap_pi(angle: float) -> float:
         """
-        将角度限制在 [-pi, pi] 范围内。（防止 yaw 角误差从 +179° 到 -179° 时被错误地认为差了 358°。）
+        将角度限制在 [-pi, pi] 范围内。（防止 yaw 角误差从 +179° 到 -179° 时被错误地认为差了 358°。)
         """
         return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
@@ -246,7 +236,6 @@ class FourMotorController:
     def quat_to_euler_wxyz(quat: np.ndarray) -> tuple[float, float, float]:
         """
         将四元数 [w, x, y, z] 转换为欧拉角 roll, pitch, yaw。
-
         MuJoCo 里的自由关节姿态通常使用四元数表示。
         四元数不容易直接用于简单 PID 控制，因此这里转换成欧拉角。
         """
@@ -322,25 +311,22 @@ class FourMotorController:
         """
         在 t0 到 t1 之间，让目标位置从 p0 平滑移动到 p1。
 
-        使用 smoothstep:
+        使用 smoothstep公式:
             s = 3u^2 - 2u^3
-
-        优点：
-        1. 起点速度为 0;
-        2. 终点速度为 0;
-        3. 目标不会突然跳变，控制器更稳定。
+        目标不会突然跳变，控制器更稳定。
         """
-
+        #时间边界判断
         if t <= t0:
             return p0.copy(), np.zeros(3)
 
         if t >= t1:
             return p1.copy(), np.zeros(3)
-
+        
+        #标准化时间u
         duration = t1 - t0
         u = (t - t0) / duration
 
-        # 平滑位置比例
+        # smoothstep公式（s是从P0到P1的时间完成比例）
         s = 3.0 * u * u - 2.0 * u * u * u
 
         # s 对时间的导数，用来计算参考速度
@@ -350,132 +336,170 @@ class FourMotorController:
         vel_ref = ds_dt * (p1 - p0)
 
         return pos_ref, vel_ref
-
+                 
     def trajectory(self, t: float) -> PositionReference:
         """
-        生成位置轨迹。
-
-        当前任务安排：
+        生成长方形轨迹。
 
         0-1 s:
             保持初始位置；
 
-        1-4 s:
-            起飞到 hover height;
+        1-5 s:
+            起飞到悬停高度；
 
-        4-7 s:
-            悬停；
+        5-7 s:
+            在 A 点悬停；
 
-        7-12 s:
-            向 +x 方向移动；
+        7-13 s:
+            A -> B,沿 +x 方向飞行；
 
-        12-15 s:
-            悬停；
+        13-15 s:
+            在 B 点悬停；
 
-        15-20 s:
-            向 +y 方向移动；
+        15-21 s:
+            B -> C,沿 +y 方向飞行；
 
-        20-22 s:
-            悬停；
+        21-23 s:
+            在 C 点悬停；
 
-        22-25 s:
-            在当前 x/y 位置降落；
+        23-29 s:
+            C -> D,沿 -x 方向飞行；
 
-        25 s 以后:
+        29-31 s:
+            在 D 点悬停；
+
+        31-37 s:
+            D -> A,沿 -y 方向飞行，回到矩形起点上方；
+
+        37-40 s:
+            在 A 点悬停；
+
+        40-45 s:
+            降落；
+
+        45 s 以后:
             保持降落位置。
         """
 
         x0, y0, z0 = self.initial_pos
         hover_z = z0 + self.params.hover_height
 
-        # 初始位置
+        # 矩形尺寸
+        rect_x = self.params.rectangle_x_length
+        rect_y = self.params.rectangle_y_width
+
+        # 初始地面/起飞位置
         p_initial = np.array([x0, y0, z0], dtype=float)
 
-        # 起飞后的悬停位置
-        p_hover = np.array([x0, y0, hover_z], dtype=float)
+        # A 点：初始点正上方悬停位置
+        p_A = np.array([x0, y0, hover_z], dtype=float)
 
-        # x 方向移动后的目标位置
-        p_x = np.array(
-            [x0 + self.params.target_x_step, y0, hover_z],
-            dtype=float,
-        )
+        # B 点：从 A 沿 +x 方向移动
+        p_B = np.array([x0 + rect_x, y0, hover_z], dtype=float)
 
-        # x 和 y 都移动后的目标位置
-        p_xy = np.array(
-            [
-                x0 + self.params.target_x_step,
-                y0 + self.params.target_y_step,
-                hover_z,
-            ],
-            dtype=float,
-        )
+        # C 点：从 B 沿 +y 方向移动
+        p_C = np.array([x0 + rect_x, y0 + rect_y, hover_z], dtype=float)
 
-        # 降落位置：x/y 保持最终位置，z 回到初始高度
-        p_land = np.array(
-            [
-                x0 + self.params.target_x_step,
-                y0 + self.params.target_y_step,
-                z0,
-            ],
-            dtype=float,
-        )
+        # D 点：从 C 沿 -x 方向移动
+        p_D = np.array([x0, y0 + rect_y, hover_z], dtype=float)
 
-        # yaw_ref 默认保持初始朝向。
-        # 这不是手动指定 roll/pitch，而是让无人机不要发生无意义偏航漂移。
+        # 回到 A 点下方降落
+        p_land = np.array([x0, y0, z0], dtype=float)
+
+        # 当前版本保持初始 yaw，不主动转向。
         yaw_ref = self.initial_yaw
 
+        # 0-1 s：保持初始位置
         if t < 1.0:
             pos_ref = p_initial
             vel_ref = np.zeros(3)
 
-        elif t < 4.0:
+        # 1-5 s：起飞到 A 点
+        elif t < 5.0:
             pos_ref, vel_ref = self._smooth_segment(
                 t=t,
                 t0=1.0,
-                t1=4.0,
+                t1=5.0,
                 p0=p_initial,
-                p1=p_hover,
+                p1=p_A,
             )
 
+        # 5-7 s：A 点悬停
         elif t < 7.0:
-            pos_ref = p_hover
+            pos_ref = p_A
             vel_ref = np.zeros(3)
 
-        elif t < 12.0:
+        # 7-13 s：A -> B，沿 +x 方向
+        elif t < 13.0:
             pos_ref, vel_ref = self._smooth_segment(
                 t=t,
                 t0=7.0,
-                t1=12.0,
-                p0=p_hover,
-                p1=p_x,
+                t1=13.0,
+                p0=p_A,
+                p1=p_B,
             )
 
+        # 13-15 s：B 点悬停
         elif t < 15.0:
-            pos_ref = p_x
+            pos_ref = p_B
             vel_ref = np.zeros(3)
 
-        elif t < 20.0:
+        # 15-21 s：B -> C，沿 +y 方向
+        elif t < 21.0:
             pos_ref, vel_ref = self._smooth_segment(
                 t=t,
                 t0=15.0,
-                t1=20.0,
-                p0=p_x,
-                p1=p_xy,
+                t1=21.0,
+                p0=p_B,
+                p1=p_C,
             )
 
-        elif t < 22.0:
-            pos_ref = p_xy
+        # 21-23 s：C 点悬停
+        elif t < 23.0:
+            pos_ref = p_C
             vel_ref = np.zeros(3)
 
-        elif t < 25.0:
+        # 23-29 s：C -> D，沿 -x 方向
+        elif t < 29.0:
             pos_ref, vel_ref = self._smooth_segment(
                 t=t,
-                t0=21.0,
-                t1=25.0,
-                p0=p_xy,
+                t0=23.0,
+                t1=29.0,
+                p0=p_C,
+                p1=p_D,
+            )
+
+        # 29-31 s：D 点悬停
+        elif t < 31.0:
+            pos_ref = p_D
+            vel_ref = np.zeros(3)
+
+        # 31-37 s：D -> A，沿 -y 方向，回到起点上方
+        elif t < 37.0:
+            pos_ref, vel_ref = self._smooth_segment(
+                t=t,
+                t0=31.0,
+                t1=37.0,
+                p0=p_D,
+                p1=p_A,
+            )
+
+        # 37-40 s：A 点悬停
+        elif t < 40.0:
+            pos_ref = p_A
+            vel_ref = np.zeros(3)
+
+        # 40-45 s：降落
+        elif t < 45.0:
+            pos_ref, vel_ref = self._smooth_segment(
+                t=t,
+                t0=40.0,
+                t1=45.0,
+                p0=p_A,
                 p1=p_land,
             )
 
+        # 45 s 以后：保持降落位置
         else:
             pos_ref = p_land
             vel_ref = np.zeros(3)
@@ -554,7 +578,7 @@ class FourMotorController:
         # 当 yaw_ref = 0 时，近似关系为：
         #     pitch_ref ≈ acc_x / g
         #     roll_ref  ≈ -acc_y / g
-        # 可以单独反转 roll_ref 或 pitch_ref 的符号。
+        # 可以根据实际仿真效果反转 roll_ref 或 pitch_ref 的符号。
         roll_ref = (
             acc_cmd[0] * math.sin(yaw_ref)
             - acc_cmd[1] * math.cos(yaw_ref)
@@ -717,7 +741,7 @@ class FourMotorController:
             dtype=float,
         )
 
-        # 通过 A^-1 计算四个电机推力。
+        # 通过 A^-1 计算四个电机推力。[f1, f2, f3, f4]^T = A^-1 [T, tau_x, tau_y, tau_z]^T，@ 是 Python/NumPy 的矩阵乘法符号。
         motor_cmd = self.allocation_matrix_inv @ desired
 
         # 限制电机推力范围，必须和 XML 中 ctrlrange 保持一致。
@@ -806,7 +830,7 @@ def run(
     log_csv: Path | None = None,
 ) -> None:
     """
-    加载 MuJoCo XML，运行仿真，并可选择保存 CSV 日志。
+    加载 MuJoCo XML,运行仿真，并可选择保存 CSV 日志。
     """
 
     # 加载模型
@@ -904,6 +928,8 @@ def run(
                 if data.time >= next_print_time and info:
                     pos = info["pos"]
                     ref_pos = info["ref_pos"]
+                    vel = info["vel"]
+                    acc_cmd = info["acc_cmd"]
                     rpy = info["rpy"]
                     rpy_ref = info["rpy_ref"]
 
@@ -911,8 +937,8 @@ def run(
                         f"t={data.time:6.2f} s | "
                         f"pos=({pos[0]:+.3f}, {pos[1]:+.3f}, {pos[2]:+.3f}) | "
                         f"ref=({ref_pos[0]:+.3f}, {ref_pos[1]:+.3f}, {ref_pos[2]:+.3f}) | "
-                        #f"rpy=({rpy[0]:+.3f}, {rpy[1]:+.3f}, {rpy[2]:+.3f}) | "
-                        #f"rpy_ref=({rpy_ref[0]:+.3f}, {rpy_ref[1]:+.3f}, {rpy_ref[2]:+.3f}) | "
+                        f"vel=({vel[0]:+.3f}, {vel[1]:+.3f}, {vel[2]:+.3f}) | "
+                        f"acc=({acc_cmd[0]:+.3f}, {acc_cmd[1]:+.3f}, {acc_cmd[2]:+.3f}) | "
                         f"ctrl=[{motor_cmd[0]:.7f}, {motor_cmd[1]:.7f}, "
                         f"{motor_cmd[2]:.7f}, {motor_cmd[3]:.7f}]"
                     )
@@ -956,7 +982,7 @@ def main() -> None:
     2. 指定仿真时间：
         python cf2_4motor_control.py --duration 30
 
-    3. 保存 CSV：
+    3. 保存 CSV;
         python cf2_4motor_control.py --duration 30 --log-csv flight_log.csv
 
     4. 不按真实时间运行，尽可能快速仿真：
@@ -980,7 +1006,7 @@ def main() -> None:
     parser.add_argument(
         "--duration",
         type=float,
-        default=30.0,
+        default=50.0,
         help="仿真持续时间，单位秒。",
     )
 
