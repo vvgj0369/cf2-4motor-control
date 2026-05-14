@@ -2,7 +2,7 @@
 四电机 MuJoCo Crazyflie 基础飞行控制器。
 
 1. 读取无人机当前位置、速度、姿态四元数、角速度；
-2. 生成位置轨迹：起飞 -> 悬停 -> 按照矩形轨迹飞行，并在到达四个点时分别悬停2秒 -> 降落；
+2. 生成位置轨迹：起飞 -> 按照矩形轨迹飞行,并在到达四个点时分别悬停2秒  -> 降落；
 3. 位置外环：根据 x/y/z 位置误差计算期望加速度 acc_cmd;
 4. 将 acc_cmd 转换为总推力 thrust_total、roll_ref、pitch_ref;
 5. yaw_ref 默认保持初始航向 initial_yaw;
@@ -67,8 +67,8 @@ class QuadParams:
     kp_y: float = 0.95
     kd_y: float = 4.5
 
-    kp_z: float = 5.2
-    kd_z: float = 4.0
+    kp_z: float = 4.6
+    kd_z: float = 4.5
 
     # -------------------------
     # 姿态内环 PID 参数
@@ -88,7 +88,7 @@ class QuadParams:
     # 安全限制参数
     # -------------------------
     # 最大允许倾斜角，单位 rad。
-    # 0.20 rad 大约等于 11.5 度。
+    # 0.16 rad 大约等于 9.2 度。
     max_tilt: float = 0.16
 
     # x/y 方向最大期望加速度，避免水平运动过激。
@@ -144,8 +144,6 @@ class DroneState:
 @dataclass
 class PositionReference:
     """
-    轨迹生成器输出的位置参考。不是目标位置！
-
     pos:当前时刻参考位置 [x_ref, y_ref, z_ref]
 
     vel:当前时刻参考速度 [vx_ref, vy_ref, vz_ref]
@@ -265,10 +263,10 @@ class FourMotorController:
 
     def get_state(self) -> DroneState:
         """
-        从 MuJoCo 中读取当前无人机状态。（注:qpos和qvel均为MujoCo内部状态)
+        从 MuJoCo 中读取当前无人机实时状态。（注:qpos和qvel均为MujoCo内部状态)
         """
 
-        # 从 sensor 读取姿态四元数和角速度。
+        # 从 sensor 读取姿态四元数和角速度。（四元数用于获取欧拉角，角速度用于后续PD控制计算力矩tau)
         quat = self._read_sensor("body_quat")
         gyro = self._read_sensor("body_gyro")
 
@@ -300,7 +298,7 @@ class FourMotorController:
     # 3.4 轨迹生成器
     # ------------------------------------------------------------
 
-    @staticmethod
+        @staticmethod
     def _smooth_segment(
         t: float,
         t0: float,
@@ -311,32 +309,33 @@ class FourMotorController:
         """
         在 t0 到 t1 之间，让目标位置从 p0 平滑移动到 p1。
 
-        使用 smoothstep公式:
-            s = 3u^2 - 2u^3
-        目标不会突然跳变，控制器更稳定。
+        使用 minimum-jerk trajectory:
+            s = 10u^3 - 15u^4 + 6u^5
+
+        相比 smoothstep，它不仅保证起点/终点速度为 0，
+        还保证起点/终点加速度为 0，因此轨迹段切换更平滑。
         """
-        #时间边界判断
+
         if t <= t0:
             return p0.copy(), np.zeros(3)
 
         if t >= t1:
             return p1.copy(), np.zeros(3)
-        
-        #标准化时间u
+
         duration = t1 - t0
         u = (t - t0) / duration
 
-        # smoothstep公式（s是从P0到P1的时间完成比例）
-        s = 3.0 * u * u - 2.0 * u * u * u
+        # minimum-jerk 位置比例
+        s = 10.0 * u**3 - 15.0 * u**4 + 6.0 * u**5
 
-        # s 对时间的导数，用来计算参考速度
-        ds_dt = (6.0 * u - 6.0 * u * u) / duration
+        # minimum-jerk 的一阶导数，用于生成参考速度
+        ds_dt = (30.0 * u**2 - 60.0 * u**3 + 30.0 * u**4) / duration
 
         pos_ref = p0 + s * (p1 - p0)
         vel_ref = ds_dt * (p1 - p0)
 
         return pos_ref, vel_ref
-                 
+            
     def trajectory(self, t: float) -> PositionReference:
         """
         生成长方形轨迹。
@@ -764,8 +763,8 @@ class FourMotorController:
         执行顺序：
         1. 读取当前状态；
         2. 生成目标轨迹；
-        3. 位置外环计算 thrust_total, roll_ref, pitch_ref, yaw_ref；
-        4. 姿态内环计算 tau_x, tau_y, tau_z；
+        3. 位置外环计算 thrust_total, roll_ref, pitch_ref, yaw_ref;
+        4. 姿态内环计算 tau_x, tau_y, tau_z;
         5. mixer 计算四个电机推力；
         6. 写入 data.ctrl。
         """
@@ -1041,4 +1040,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+        main()
