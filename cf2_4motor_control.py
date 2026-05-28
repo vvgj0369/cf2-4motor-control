@@ -61,14 +61,14 @@ class QuadParams:
     # -------------------------
     # 外环作用：
     # 位置误差 + 速度误差 -> 期望加速度 acc_cmd
-    kp_x: float = 0.9
-    kd_x: float = 4.5
+    kp_x: float = 0.95
+    kd_x: float = 4.0
 
     kp_y: float = 0.95
     kd_y: float = 4.5
 
-    kp_z: float = 4.5
-    kd_z: float = 4.0
+    kp_z: float = 4.6
+    kd_z: float = 4.5
 
     # -------------------------
     # 姿态内环 PID 参数
@@ -167,23 +167,6 @@ class FourMotorController:
         self.model = model
         self.data = data
         self.params = params
-
-        # ------------------------------------------------------------
-        # 自动从 MuJoCo XML 模型中读取 cf2 body 的总质量。
-        # 这样运行 baseline XML 和 cage XML 时，不需要手动修改 Python 里的 mass。
-        # baseline XML 中 mass="0.027" 时，控制器自动使用 0.027 kg。
-        # cage XML 中 mass="0.042" 时，控制器自动使用 0.042 kg。
-        # ------------------------------------------------------------
-        cf2_body_id = mujoco.mj_name2id(
-            self.model,
-            mujoco.mjtObj.mjOBJ_BODY,
-            "cf2",
-        )
-
-        if cf2_body_id < 0:
-            raise ValueError("Body 'cf2' not found in MuJoCo model.")
-
-        self.params.mass = float(self.model.body_subtreemass[cf2_body_id])
 
         # MuJoCo 仿真步长。
         self.dt = float(model.opt.timestep)
@@ -314,7 +297,8 @@ class FourMotorController:
     # ------------------------------------------------------------
     # 3.4 轨迹生成器
     # ------------------------------------------------------------
-    @staticmethod
+
+        @staticmethod
     def _smooth_segment(
         t: float,
         t0: float,
@@ -325,26 +309,27 @@ class FourMotorController:
         """
         在 t0 到 t1 之间，让目标位置从 p0 平滑移动到 p1。
 
-        使用 smoothstep公式:
-            s = 3u^2 - 2u^3
-        目标不会突然跳变，控制器更稳定。
+        使用 minimum-jerk trajectory:
+            s = 10u^3 - 15u^4 + 6u^5
+
+        相比 smoothstep，它不仅保证起点/终点速度为 0，
+        还保证起点/终点加速度为 0，因此轨迹段切换更平滑。
         """
-        #时间边界判断
+
         if t <= t0:
             return p0.copy(), np.zeros(3)
 
         if t >= t1:
             return p1.copy(), np.zeros(3)
-        
-        #标准化时间u
+
         duration = t1 - t0
         u = (t - t0) / duration
 
-        # smoothstep公式（s是从P0到P1的时间完成比例）
-        s = 3.0 * u * u - 2.0 * u * u * u
+        # minimum-jerk 位置比例
+        s = 10.0 * u**3 - 15.0 * u**4 + 6.0 * u**5
 
-        # s 对时间的导数，用来计算参考速度
-        ds_dt = (6.0 * u - 6.0 * u * u) / duration
+        # minimum-jerk 的一阶导数，用于生成参考速度
+        ds_dt = (30.0 * u**2 - 60.0 * u**3 + 30.0 * u**4) / duration
 
         pos_ref = p0 + s * (p1 - p0)
         vel_ref = ds_dt * (p1 - p0)
@@ -864,7 +849,6 @@ def run(
     print(f"Loaded model: {xml_path}")
     print(f"Initial position: {controller.initial_pos}")
     print(f"Initial yaw: {controller.initial_yaw:.4f} rad")
-    print(f"Controller mass from XML: {controller.params.mass:.5f} kg")
 
     hover_thrust_per_motor = controller.params.mass * controller.params.gravity / 4.0
     print(f"Nominal hover thrust per motor: {hover_thrust_per_motor:.5f} N")
@@ -874,8 +858,6 @@ def run(
     writer = None
 
     if log_csv is not None:
-        log_csv.parent.mkdir(parents=True, exist_ok=True)
-
         log_file = open(log_csv, "w", newline="", encoding="utf-8")
         writer = csv.writer(log_file)
 
@@ -1058,4 +1040,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+        main()
