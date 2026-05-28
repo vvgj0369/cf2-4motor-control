@@ -2,7 +2,7 @@
 四电机 MuJoCo Crazyflie 基础飞行控制器。
 
 1. 读取无人机当前位置、速度、姿态四元数、角速度；
-2. 生成位置轨迹：起飞 -> 悬停 -> 按照矩形轨迹飞行，并在到达四个点时分别悬停2秒 -> 降落；
+2. 生成位置轨迹：起飞 -> 按照矩形轨迹飞行,并在到达四个点时分别悬停2秒  -> 降落；
 3. 位置外环：根据 x/y/z 位置误差计算期望加速度 acc_cmd;
 4. 将 acc_cmd 转换为总推力 thrust_total、roll_ref、pitch_ref;
 5. yaw_ref 默认保持初始航向 initial_yaw;
@@ -61,13 +61,13 @@ class QuadParams:
     # -------------------------
     # 外环作用：
     # 位置误差 + 速度误差 -> 期望加速度 acc_cmd
-    kp_x: float = 0.95
-    kd_x: float = 4.0
+    kp_x: float = 0.9
+    kd_x: float = 4.5
 
     kp_y: float = 0.95
     kd_y: float = 4.5
 
-    kp_z: float = 5.2
+    kp_z: float = 4.5
     kd_z: float = 4.0
 
     # -------------------------
@@ -88,7 +88,7 @@ class QuadParams:
     # 安全限制参数
     # -------------------------
     # 最大允许倾斜角，单位 rad。
-    # 0.20 rad 大约等于 11.5 度。
+    # 0.16 rad 大约等于 9.2 度。
     max_tilt: float = 0.16
 
     # x/y 方向最大期望加速度，避免水平运动过激。
@@ -144,8 +144,6 @@ class DroneState:
 @dataclass
 class PositionReference:
     """
-    轨迹生成器输出的位置参考。不是目标位置！
-
     pos:当前时刻参考位置 [x_ref, y_ref, z_ref]
 
     vel:当前时刻参考速度 [vx_ref, vy_ref, vz_ref]
@@ -169,6 +167,23 @@ class FourMotorController:
         self.model = model
         self.data = data
         self.params = params
+
+        # ------------------------------------------------------------
+        # 自动从 MuJoCo XML 模型中读取 cf2 body 的总质量。
+        # 这样运行 baseline XML 和 cage XML 时，不需要手动修改 Python 里的 mass。
+        # baseline XML 中 mass="0.027" 时，控制器自动使用 0.027 kg。
+        # cage XML 中 mass="0.042" 时，控制器自动使用 0.042 kg。
+        # ------------------------------------------------------------
+        cf2_body_id = mujoco.mj_name2id(
+            self.model,
+            mujoco.mjtObj.mjOBJ_BODY,
+            "cf2",
+        )
+
+        if cf2_body_id < 0:
+            raise ValueError("Body 'cf2' not found in MuJoCo model.")
+
+        self.params.mass = float(self.model.body_subtreemass[cf2_body_id])
 
         # MuJoCo 仿真步长。
         self.dt = float(model.opt.timestep)
@@ -265,10 +280,10 @@ class FourMotorController:
 
     def get_state(self) -> DroneState:
         """
-        从 MuJoCo 中读取当前无人机状态。（注:qpos和qvel均为MujoCo内部状态)
+        从 MuJoCo 中读取当前无人机实时状态。（注:qpos和qvel均为MujoCo内部状态)
         """
 
-        # 从 sensor 读取姿态四元数和角速度。
+        # 从 sensor 读取姿态四元数和角速度。（四元数用于获取欧拉角，角速度用于后续PD控制计算力矩tau)
         quat = self._read_sensor("body_quat")
         gyro = self._read_sensor("body_gyro")
 
@@ -299,7 +314,6 @@ class FourMotorController:
     # ------------------------------------------------------------
     # 3.4 轨迹生成器
     # ------------------------------------------------------------
-
     @staticmethod
     def _smooth_segment(
         t: float,
@@ -336,7 +350,7 @@ class FourMotorController:
         vel_ref = ds_dt * (p1 - p0)
 
         return pos_ref, vel_ref
-                 
+            
     def trajectory(self, t: float) -> PositionReference:
         """
         生成长方形轨迹。
@@ -764,8 +778,8 @@ class FourMotorController:
         执行顺序：
         1. 读取当前状态；
         2. 生成目标轨迹；
-        3. 位置外环计算 thrust_total, roll_ref, pitch_ref, yaw_ref；
-        4. 姿态内环计算 tau_x, tau_y, tau_z；
+        3. 位置外环计算 thrust_total, roll_ref, pitch_ref, yaw_ref;
+        4. 姿态内环计算 tau_x, tau_y, tau_z;
         5. mixer 计算四个电机推力；
         6. 写入 data.ctrl。
         """
@@ -850,6 +864,7 @@ def run(
     print(f"Loaded model: {xml_path}")
     print(f"Initial position: {controller.initial_pos}")
     print(f"Initial yaw: {controller.initial_yaw:.4f} rad")
+    print(f"Controller mass from XML: {controller.params.mass:.5f} kg")
 
     hover_thrust_per_motor = controller.params.mass * controller.params.gravity / 4.0
     print(f"Nominal hover thrust per motor: {hover_thrust_per_motor:.5f} N")
@@ -859,6 +874,8 @@ def run(
     writer = None
 
     if log_csv is not None:
+        log_csv.parent.mkdir(parents=True, exist_ok=True)
+
         log_file = open(log_csv, "w", newline="", encoding="utf-8")
         writer = csv.writer(log_file)
 

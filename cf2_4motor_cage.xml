@@ -67,10 +67,12 @@
   </asset>
 
   <worldbody>
-    <body name="cf2" pos="0 0 0" childclass="cf2">
+    <body name="cf2" pos="0 0 0.1" childclass="cf2">
       <freejoint/>
-      <!--惯性参考点，位于body中心的局部坐标系/ 质量0.027kg/ x,y,z对角惯量-->
-      <inertial pos="0 0 0" mass="0.027" diaginertia="2.3951e-5 2.3951e-5 3.2347e-5"/>
+      <!--惯性参考点，位于body中心的局部坐标系/ 质量0.027kg+0.015kg/ x,y,z对角惯量-->
+      <inertial pos="0 0 0"
+          mass="0.042"
+          diaginertia="1.23951e-4 1.23951e-4 1.32347e-4"/>
       <camera name="track" pos="-1 0 0.5" xyaxes="0 -1 0 1 0 2" mode="trackcom"/>
 
       <!-- visual meshes -->
@@ -82,13 +84,17 @@
       <geom mesh="cf2_5" material="body_frame_plastic" class="visual"/>
       <geom mesh="cf2_6" material="white" class="visual"/>
       
-      <!--<geom name="cage_collision"
+      <!-- simplified spherical cage: visual + external collision boundary -->
+      <geom name="cage_collision"
       type="sphere"
       size="0.10"
       pos="0 0 0"
-      mass="0.15"
-      rgba="1 1 0 0.15"
-      friction="0.8 0.02 0.002"/>-->
+      rgba="1 0.8 0 0.18"
+      contype="1"
+      conaffinity="1"
+      friction="0.8 0.02 0.002"
+      solref="0.02 1"
+      solimp="0.9 0.95 0.001"/>
       
       <!-- collision meshes -->
       <geom mesh="cf2_collision_0" class="collision"/>
@@ -168,9 +174,5 @@
     <framequat name="body_quat" objtype="site" objname="imu"/><!--输出imu这个site的四元数-->
   </sensor>
 
-  <keyframe><!--保存一组位置和姿态，qpos = generalized position = 广义位置  高度z=0.1,四元数=1 0 0 0 -->
-    <key name="hover" qpos="0 0 0.1 1 0 0 0"
-         ctrl="0.0662175 0.0662175 0.0662175 0.0662175"/>
-  </keyframe>
 
 </mujoco>

@@ -1,0 +1,45 @@
+
+Rectangle Trajectory Simulation Metrics
+======================================
+
+CSV file:
+- /home/yikai/py/cf2_4motor/result/rectangle_log.csv
+
+Output folder:
+- /home/yikai/py/cf2_4motor/result
+
+Position tracking:
+- Max |x error|: 0.01864 m
+- Max |y error|: 0.01072 m
+- Max |z error|: 0.04266 m
+- Max XY error magnitude: 0.01882 m
+- Max 3D error magnitude: 0.04266 m
+
+RMS tracking error:
+- RMS x error: 0.00712 m
+- RMS y error: 0.00408 m
+- RMS z error: 0.00725 m
+- RMS XY error magnitude: 0.00821 m
+- RMS 3D error magnitude: 0.01095 m
+
+Attitude response:
+- Max |roll|: 0.237 deg
+- Max |pitch|: 0.378 deg
+- Max |yaw|: 0.000 deg
+
+Motor command range:
+- Min motor command: 0.059817 N
+- Max motor command: 0.067118 N
+- Motor upper limit: 0.160000 N
+- Saturation margin: 0.092882 N
+
+Generated figures:
+- fig_xy_trajectory.png
+- fig_xyz_tracking.png
+- fig_position_error.png
+- fig_attitude_tracking.png
+- fig_motor_commands.png
+- fig_velocity_response.png
+- fig_acceleration_commands.png
+- fig_torque_commands.png
+- fig_total_thrust.png
